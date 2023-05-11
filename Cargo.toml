@@ -1,0 +1,15 @@
+[package]
+name    = "mandelbrot-wgpu"
+version = "0.1.0"
+edition = "2021"
+authors = ["flippette <quangdatle2006@outlook.com>"]
+license = "MIT"
+
+[dependencies]
+bytemuck           = "1.13"
+color-eyre         = "0.6"
+eyre               = "0.6"
+pollster           = "0.3"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wgpu               = "0.16"
