@@ -1,23 +1,12 @@
+use bytemuck::{Pod, Zeroable};
 use eyre::{eyre, Result};
-use once_cell::sync::Lazy;
-use std::{fs, iter, mem, sync::mpsc};
-use tracing::{info, Level};
+use std::{fs, io::Write, iter, mem, sync::mpsc};
+use tracing::{debug, info, Level};
 use tracing_subscriber::EnvFilter;
 use wgpu::util::DeviceExt;
 
 const IMAGE_WIDTH: u32 = 4000;
 const IMAGE_HEIGHT: u32 = 3000;
-const VIEWPORT_WIDTH: f32 = 1.0;
-const VIEWPORT_HEIGHT: f32 = 0.667;
-
-static WORKGROUP_WIDTH: Lazy<u32> = Lazy::new(|| {
-    const WORKGROUP_SIZE: u32 = 64;
-
-    let w = (WORKGROUP_SIZE as f32).sqrt() as u32;
-    assert_eq!(w, WORKGROUP_SIZE);
-
-    w
-});
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -44,15 +33,63 @@ fn main() -> Result<()> {
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))?;
     info!("got wgpu device and queue!");
 
+    let workgroup_width =
+        (device.limits().max_compute_invocations_per_workgroup as f32).sqrt() as u32;
+    assert!(
+        workgroup_width * workgroup_width <= device.limits().max_compute_invocations_per_workgroup
+    );
+    info!(
+        "using workgroups of size {}!",
+        workgroup_width * workgroup_width
+    );
+
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("shader module"),
         source: wgpu::ShaderSource::Wgsl(fs::read_to_string("mandelbrot.wgsl")?.into()),
     });
     info!("created shader module!");
 
+    let image_size_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image size bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+    let storage_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("storage bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+    info!("created bind group layouts!");
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("compute pipeline layout"),
+        bind_group_layouts: &[&image_size_bind_group_layout, &storage_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+    info!("created compute pipeline layout!");
+
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("compute pipeline"),
-        layout: None,
+        layout: Some(&pipeline_layout),
         module: &shader_module,
         entry_point: "main",
     });
@@ -60,13 +97,11 @@ fn main() -> Result<()> {
 
     let image_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("image size buffer"),
-        contents: bytemuck::cast_slice(&[IMAGE_WIDTH, IMAGE_HEIGHT]),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
-    let viewport_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("viewport size buffer"),
-        contents: bytemuck::cast_slice(&[VIEWPORT_WIDTH, VIEWPORT_HEIGHT]),
-        usage: wgpu::BufferUsages::STORAGE,
+        contents: bytemuck::cast_slice(&[Vec2U {
+            x: IMAGE_WIDTH,
+            y: IMAGE_HEIGHT,
+        }]),
+        usage: wgpu::BufferUsages::UNIFORM,
     });
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("staging buffer"),
@@ -83,25 +118,24 @@ fn main() -> Result<()> {
 
     info!("created buffers!");
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("bind group"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: storage_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: image_size_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: viewport_size_buffer.as_entire_binding(),
-            },
-        ],
+    let image_size_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("image size bind group"),
+        layout: &image_size_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: image_size_buffer.as_entire_binding(),
+        }],
     });
-    info!("created bind group!");
+    let storage_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("storage bind group"),
+        layout: &storage_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: storage_buffer.as_entire_binding(),
+        }],
+    });
+
+    info!("created bind groups!");
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("command encoder"),
@@ -112,11 +146,12 @@ fn main() -> Result<()> {
         label: Some("compute pass"),
     });
     pass.set_pipeline(&pipeline);
-    pass.set_bind_group(0, &bind_group, &[]);
+    pass.set_bind_group(0, &image_size_bind_group, &[]);
+    pass.set_bind_group(1, &storage_bind_group, &[]);
     pass.insert_debug_marker("compute pass");
     pass.dispatch_workgroups(
-        IMAGE_WIDTH / *WORKGROUP_WIDTH,
-        IMAGE_HEIGHT / *WORKGROUP_WIDTH,
+        IMAGE_WIDTH / workgroup_width,
+        IMAGE_HEIGHT / workgroup_width,
         1,
     );
     drop(pass);
@@ -142,30 +177,42 @@ fn main() -> Result<()> {
 
     device.poll(wgpu::MaintainBase::Wait);
 
-    let mut result = None;
-    if let Ok(Ok(_)) = rx.recv() {
-        info!("got result!");
-        let data = buffer_slice.get_mapped_range();
-        result = Some(bytemuck::cast_slice::<_, u32>(&data).to_vec());
-    }
+    // let Ok(Ok(result)) = rx.recv() {
+    //     info!("got result!");
+    //     let data = buffer_slice.get_mapped_range();
+    //     data.iter().step_by(4).copied().collect::<Vec<_>>()
+    // };
+
+    let result: Vec<u8> = rx.recv()?.map(|_| {
+        buffer_slice
+            .get_mapped_range()
+            .iter()
+            .step_by(4)
+            .copied()
+            .collect::<Vec<_>>()
+    })?;
+
+    debug!("{:?}", &result[0..32]);
 
     staging_buffer.unmap();
 
-    let pgm_data = format!(
-        "P5\n{} {}\n255\n{}",
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        result
-            .map(|pixels| pixels
-                .iter()
-                .map(|px| char::from_u32(*px).unwrap())
-                .collect::<String>())
-            .ok_or_else(|| eyre!("failed to compute result!"))?
-    );
-    info!("created pgm image data!");
-
-    fs::write("image.pgm", pgm_data)?;
+    let mut file = fs::File::options()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open("image.pgm")?;
+    let header = format!("P5\n{} {}\n255\n", IMAGE_WIDTH, IMAGE_HEIGHT);
+    file.write_all(header.as_bytes())?;
+    file.write_all(&result)?;
     info!("wrote image data!");
 
     Ok(())
+}
+
+// for creating WGSL uniforms
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Vec2U {
+    x: u32,
+    y: u32,
 }

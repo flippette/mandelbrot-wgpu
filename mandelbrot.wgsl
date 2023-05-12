@@ -1,32 +1,26 @@
+// width, height in pixels
 @group(0)
+@binding(0)
+var<uniform> image_size: vec2u;
+
+@group(1)
 @binding(0)
 var<storage, read_write> pixels: array<u32>;
 
-// width, height in pixels
-@group(0)
-@binding(1)
-var<storage, read> image_size: array<u32, 2>;
-
-// width, height in units
-@group(0)
-@binding(2)
-var<storage, read> viewport_size: array<f32, 2>;
-
 @compute
-@workgroup_size(64, 64, 1)
+@workgroup_size(16, 16, 1)
 fn main(
-    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(global_invocation_id) id: vec3u,
 ) {
-    let image_size = vec2<u32>(image_size[0], image_size[1]);
-    let viewport_size = vec2<f32>(viewport_size[0], viewport_size[1]);
+    let aspect_ratio = f32(image_size.x) / f32(image_size.y);
+    let viewport_size = vec2f(aspect_ratio, 1.0) * 3.5;
+    let step = viewport_size / vec2f(image_size);
 
-    let step = viewport_size / vec2<f32>(image_size);
+    let pos = vec2f(id.xy) * step - viewport_size / 2.0;
+    var z = pos;
+    var i = 254u;
 
-    let pos = vec2<f32>(id.xy);
-    var z = vec2<f32>(0f);
-    var i = 255u;
-
-    while i > 0u && !oob(z, viewport_size) {
+    while !oob(z, viewport_size) && i > 0u {
         i -= 1u;
         z = square(z) + pos;
     }
@@ -34,14 +28,14 @@ fn main(
     pixels[id.y * image_size.x + id.x] = i;
 }
 
-fn square(c: vec2<f32>) -> vec2<f32> {
+fn square(c: vec2f) -> vec2f {
     // (a+bi)(a+bi) = aa - bb + 2abi
-    return vec2<f32>(
+    return vec2f(
         c.x * c.x - c.y * c.y,
         2f * c.x * c.y,
     );
 }
 
-fn oob(c: vec2<f32>, viewport_size: vec2<f32>) -> bool {
+fn oob(c: vec2f, viewport_size: vec2f) -> bool {
     return abs(c.x) > viewport_size.x / 2f || abs(c.y) > viewport_size.y / 2f;
 }
