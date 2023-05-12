@@ -1,4 +1,5 @@
 use eyre::{eyre, Result};
+use once_cell::sync::Lazy;
 use std::{fs, iter, mem, sync::mpsc};
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
@@ -8,6 +9,15 @@ const IMAGE_WIDTH: u32 = 4000;
 const IMAGE_HEIGHT: u32 = 3000;
 const VIEWPORT_WIDTH: f32 = 1.0;
 const VIEWPORT_HEIGHT: f32 = 0.667;
+
+static WORKGROUP_WIDTH: Lazy<u32> = Lazy::new(|| {
+    const WORKGROUP_SIZE: u32 = 64;
+
+    let w = (WORKGROUP_SIZE as f32).sqrt() as u32;
+    assert_eq!(w, WORKGROUP_SIZE);
+
+    w
+});
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -104,7 +114,11 @@ fn main() -> Result<()> {
     pass.set_pipeline(&pipeline);
     pass.set_bind_group(0, &bind_group, &[]);
     pass.insert_debug_marker("compute pass");
-    pass.dispatch_workgroups(IMAGE_WIDTH, IMAGE_HEIGHT / 2, 1);
+    pass.dispatch_workgroups(
+        IMAGE_WIDTH / *WORKGROUP_WIDTH,
+        IMAGE_HEIGHT / *WORKGROUP_WIDTH,
+        1,
+    );
     drop(pass);
     info!("recorded compute pass!");
 

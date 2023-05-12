@@ -13,7 +13,7 @@ var<storage, read> image_size: array<u32, 2>;
 var<storage, read> viewport_size: array<f32, 2>;
 
 @compute
-@workgroup_size(1)
+@workgroup_size(64, 64, 1)
 fn main(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
